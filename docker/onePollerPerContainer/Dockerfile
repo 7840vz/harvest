@@ -24,11 +24,9 @@ fi
 
 RUN cp -a $BUILD_DIR/harvest.yml $INSTALL_DIR/harvest.yml
 
-RUN cp -aR bin $BUILD_DIR/conf $BUILD_DIR/docs $BUILD_DIR/grafana $BUILD_DIR/autosupport $BUILD_DIR/prom-stack.tmpl $INSTALL_DIR
-
-RUN cp -aR $BUILD_DIR/docker/onePollerPerContainer/docker-compose.tmpl $INSTALL_DIR/docker/onePollerPerContainer/
-
-RUN cp -aR $BUILD_DIR/docker/prometheus $INSTALL_DIR/docker/prometheus
+RUN cp -aR bin $BUILD_DIR/conf $BUILD_DIR/docs $BUILD_DIR/grafana $BUILD_DIR/autosupport $BUILD_DIR/prom-stack.tmpl $INSTALL_DIR &&  \
+    cp -aR $BUILD_DIR/docker/onePollerPerContainer/docker-compose.tmpl $INSTALL_DIR/docker/onePollerPerContainer/ &&  \
+    cp -aR $BUILD_DIR/docker/prometheus $INSTALL_DIR/docker
 
 FROM alpine:latest
 
