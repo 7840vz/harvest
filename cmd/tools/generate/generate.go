@@ -128,10 +128,10 @@ func generateDocker(path string, kind int) {
 		opts.grafanaPort,
 		opts.promPort,
 	}
-	//err := conf.LoadHarvestConfig(path)
-	//if err != nil {
-	//	panic(err)
-	//}
+	err := conf.LoadHarvestConfig(path)
+	if err != nil {
+		panic(err)
+	}
 	configFilePath, err := filepath.Abs(path)
 	if err != nil {
 		panic(err)
