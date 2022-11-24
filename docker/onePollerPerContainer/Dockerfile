@@ -12,7 +12,7 @@ ARG ASUP_MAKE_TARGET=build
 # Set the Current Working Directory inside the container
 WORKDIR $BUILD_DIR
 
-RUN mkdir -p $INSTALL_DIR
+RUN mkdir -p $INSTALL_DIR $INSTALL_DIR/docker/onePollerPerContainer/
 
 COPY . .
 
@@ -24,7 +24,9 @@ fi
 
 RUN cp -a $BUILD_DIR/harvest.yml $INSTALL_DIR/harvest.yml
 
-RUN cp -aR bin $BUILD_DIR/conf $BUILD_DIR/docs $BUILD_DIR/grafana $BUILD_DIR/autosupport $INSTALL_DIR
+RUN cp -aR bin $BUILD_DIR/conf $BUILD_DIR/docs $BUILD_DIR/grafana $BUILD_DIR/autosupport $BUILD_DIR/prom-stack.tmpl $INSTALL_DIR
+
+RUN cp -aR $BUILD_DIR/docker/onePollerPerContainer/docker-compose.tmpl $INSTALL_DIR/docker/onePollerPerContainer/
 
 FROM alpine:latest
 
