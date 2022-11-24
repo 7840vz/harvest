@@ -28,7 +28,7 @@ RUN cp -aR bin $BUILD_DIR/conf $BUILD_DIR/docs $BUILD_DIR/grafana $BUILD_DIR/aut
 
 RUN cp -aR $BUILD_DIR/docker/onePollerPerContainer/docker-compose.tmpl $INSTALL_DIR/docker/onePollerPerContainer/
 
-RUN cp -aR $BUILD_DIR/docker/prometheus/harvest_targets.yml $INSTALL_DIR/docker/prometheus
+RUN cp -aR $BUILD_DIR/docker/prometheus $INSTALL_DIR/docker/prometheus
 
 FROM alpine:latest
 
