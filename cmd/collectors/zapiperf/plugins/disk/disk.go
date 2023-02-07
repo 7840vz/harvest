@@ -14,7 +14,11 @@ import (
 	"strings"
 )
 
-const batchSize = "500"
+const (
+	batchSize      = "500"
+	oneTib         = 1024 * 1024 * 1024 * 1024
+	powerHddWeight = 1.4
+)
 
 type RaidAggrDerivedType string
 type RaidAggrType string
@@ -70,11 +74,13 @@ type aggregate struct {
 }
 
 type disk struct {
-	name       string
-	shelfID    string
-	id         string
-	diskType   string
-	aggregates []string
+	name              string
+	shelfID           string
+	id                string
+	diskType          string
+	effectiveDiskType string
+	aggregates        []string
+	calculatedBytes   float64
 }
 
 type shelfEnvironmentMetric struct {
@@ -100,6 +106,10 @@ var shelfMetrics = []string{
 
 var aggrMetrics = []string{
 	"power",
+}
+
+var clusterDiskPowerMetrics = []string{
+	"disk_power_per_tib",
 }
 
 func New(p *plugin.AbstractPlugin) plugin.Plugin {
@@ -206,6 +216,7 @@ func (d *Disk) Init() error {
 
 	d.initShelfPowerMatrix()
 	d.initAggrPowerMatrix()
+	d.initClusterDiskPowerMatrix()
 
 	d.initMaps()
 
@@ -228,6 +239,17 @@ func (d *Disk) initAggrPowerMatrix() {
 
 	for _, k := range aggrMetrics {
 		err := matrix.CreateMetric(k, d.powerData["aggr"])
+		if err != nil {
+			d.Logger.Warn().Err(err).Str("key", k).Msg("error while creating metric")
+		}
+	}
+}
+
+func (d *Disk) initClusterDiskPowerMatrix() {
+	d.powerData["clusterDiskPower"] = matrix.New(d.Parent+".clusterDiskPower", "cluster", "cluster")
+
+	for _, k := range clusterDiskPowerMetrics {
+		err := matrix.CreateMetric(k, d.powerData["clusterDiskPower"])
 		if err != nil {
 			d.Logger.Warn().Err(err).Str("key", k).Msg("error while creating metric")
 		}
@@ -299,6 +321,11 @@ func (d *Disk) Run(data *matrix.Matrix) ([]*matrix.Matrix, error) {
 	}
 
 	output, err = d.calculateAggrPower(data, output)
+	if err != nil {
+		return output, err
+	}
+
+	output, err = d.calculateAverageDiskTypePower(output)
 	if err != nil {
 		return output, err
 	}
@@ -453,7 +480,10 @@ func (d *Disk) getDisks() error {
 	diskInventoryInfo.NewChildS("shelf", "")
 	diskInventoryInfo.NewChildS("is-shared", "")
 	diskInventoryInfo.NewChildS("disk-type", "")
+	diskInventoryInfo.NewChildS("bytes-per-sector", "")
+	diskInventoryInfo.NewChildS("capacity-sectors", "")
 	diskRaidInfo := node.NewXMLS("disk-raid-info")
+	diskRaidInfo.NewChildS("effective-disk-type", "")
 	diskAggregateInfo := node.NewXMLS("disk-aggregate-info")
 	diskSharedInfo := node.NewXMLS("disk-shared-info")
 	diskRaidInfo.AddChild(diskAggregateInfo)
@@ -488,6 +518,8 @@ func (d *Disk) getDisks() error {
 				shelfID := dii.GetChildContentS("shelf")
 				isShared := dii.GetChildContentS("is-shared")
 				diskType := dii.GetChildContentS("disk-type")
+				bytesPerSector := dii.GetChildContentS("bytes-per-sector")
+				capacitySectors := dii.GetChildContentS("capacity-sectors")
 				var aggrNames []string
 				if isShared == "true" {
 					if dri != nil {
@@ -512,12 +544,30 @@ func (d *Disk) getDisks() error {
 						}
 					}
 				}
+				var edt string
+				if dri != nil {
+					edt = dri.GetChildContentS("effective-disk-type")
+				}
+
+				var calculatedBytes float64
+				if bps, err := strconv.ParseFloat(bytesPerSector, 64); err != nil {
+					d.Logger.Warn().Str("bytesPerSector", bytesPerSector).Msg("failed to parse bytes per sector")
+				} else {
+					if cs, err := strconv.ParseFloat(capacitySectors, 64); err != nil {
+						d.Logger.Warn().Str("capacitySectors", capacitySectors).Msg("failed to parse capacity sector")
+					} else {
+						calculatedBytes = bps * cs
+					}
+				}
+
 				dis := &disk{
-					name:       diskName,
-					shelfID:    shelfID,
-					id:         diskUID,
-					aggregates: aggrNames,
-					diskType:   diskType,
+					name:              diskName,
+					shelfID:           shelfID,
+					id:                diskUID,
+					aggregates:        aggrNames,
+					diskType:          diskType,
+					effectiveDiskType: edt,
+					calculatedBytes:   calculatedBytes,
 				}
 				d.diskMap[diskUID] = dis
 				sh, ok := d.ShelfMap[shelfID]
@@ -889,6 +939,118 @@ func (d *Disk) handleCMode(shelves []*node.Node) ([]*matrix.Matrix, error) {
 			}
 		}
 	}
+	return output, nil
+}
 
+/**
+ * Calculates the cluster-wide average power consumed for HDD and SSD disks by apportioning the storage shelves'
+ * actual power consumed to each disk. In the case of mixed shelves, the power distribution is weighted since HDDs
+ * consume more power than SSDs on average.
+ */
+func (d *Disk) calculateAverageDiskTypePower(output []*matrix.Matrix) ([]*matrix.Matrix, error) {
+	if len(d.ShelfMap) == 0 {
+		// no disk shelves
+		return output, nil
+	}
+
+	ssdSampleCount := 0
+	hddSampleCount := 0
+	var clusterSsdPowerPerTiB float64
+	var clusterHddPowerPerTiB float64
+
+	for _, v := range d.ShelfMap {
+		shelfPowerWatts := v.power
+		disks := v.disks
+		if len(disks) == 0 {
+			continue
+		}
+		ssdDiskCount := 0
+		hddDiskCount := 0
+
+		var shelfSsdCapacityTib float64
+		var shelfHddCapacityTib float64
+
+		for _, v1 := range disks {
+			effectiveDiskType := strings.ToLower(v1.effectiveDiskType)
+			if effectiveDiskType == "" {
+				continue
+			}
+			diskCapacityTiB := v1.calculatedBytes / oneTib
+			switch effectiveDiskType {
+			case "ssd", "ssd_nvm":
+				ssdDiskCount++
+				shelfSsdCapacityTib += diskCapacityTiB
+			case "lun", "unknown", "vmdisk":
+				// ignore these types
+			default:
+				hddDiskCount++
+				shelfHddCapacityTib += diskCapacityTiB
+			}
+		}
+		// calculate the weighted avg power per disk in case a shelf has mixed types
+		// weightedPowerPerDisk = shelfPower / (numberOfSSDs + (numberOfHDDs * 1.4))
+		weightedNumberOfDisks := (powerHddWeight * float64(hddDiskCount)) + float64(ssdDiskCount)
+		var weightedAvgDiskPowerWatts float64
+		if weightedAvgDiskPowerWatts != 0 {
+			weightedAvgDiskPowerWatts = shelfPowerWatts / weightedNumberOfDisks
+		}
+		// ssd shelf watts per Tib = weightedPowerPerDisk * numberOfSSDs / totalShelfSSDCapacityInTib
+		shelfSsdWattsPerTib := (weightedAvgDiskPowerWatts * float64(ssdDiskCount)) + shelfSsdCapacityTib
+		// hdd shelf watts per Tib = weightedPowerPerDisk * numberOfHDDs * 1.4 / totalShelfHDDCapacityInTib
+		var shelfHddWattsPerTib float64
+		if shelfHddCapacityTib != 0 {
+			shelfHddWattsPerTib = (weightedAvgDiskPowerWatts * float64(hddDiskCount) * powerHddWeight) / shelfHddCapacityTib
+		}
+
+		if shelfSsdWattsPerTib != 0 {
+			clusterSsdPowerPerTiB = clusterSsdPowerPerTiB + shelfSsdWattsPerTib
+			ssdSampleCount++
+		}
+		if shelfHddWattsPerTib != 0 {
+			clusterHddPowerPerTiB = clusterHddPowerPerTiB + shelfHddWattsPerTib
+			hddSampleCount++
+		}
+	}
+
+	var ssdPower float64
+	if ssdSampleCount != 0 {
+		ssdPower = clusterSsdPowerPerTiB / float64(ssdSampleCount)
+	}
+	var hddPower float64
+	if hddSampleCount != 0 {
+		hddPower = clusterHddPowerPerTiB / float64(hddSampleCount)
+	}
+
+	// Purge and reset data
+	clusterDiskPowerData := d.powerData["clusterDiskPower"]
+	clusterDiskPowerData.PurgeInstances()
+	clusterDiskPowerData.Reset()
+
+	instanceKey := "hdd"
+	instance, err := clusterDiskPowerData.NewInstance(instanceKey)
+	if err != nil {
+		d.Logger.Error().Err(err).Str("key", instanceKey).Msg("Failed to add instance")
+	}
+
+	m := clusterDiskPowerData.GetMetric("disk_power_per_tib")
+	err = m.SetValueFloat64(instance, hddPower)
+	if err != nil {
+		d.Logger.Error().Err(err).Str("key", instanceKey).Msg("Failed to set value")
+	}
+	instance.SetLabel("type", "hdd")
+
+	instanceKey = "ssd"
+	instance, err = clusterDiskPowerData.NewInstance(instanceKey)
+	if err != nil {
+		d.Logger.Error().Err(err).Str("key", instanceKey).Msg("Failed to add instance")
+	}
+
+	err = m.SetValueFloat64(instance, ssdPower)
+	if err != nil {
+		d.Logger.Error().Err(err).Str("key", instanceKey).Msg("Failed to set value")
+	}
+	instance.SetLabel("type", "ssd")
+
+	output = append(output, clusterDiskPowerData)
 	return output, nil
 }
