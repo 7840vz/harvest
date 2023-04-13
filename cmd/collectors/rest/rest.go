@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/netapp/harvest/v2/cmd/collectors/rest/plugins/certificate"
 	"github.com/netapp/harvest/v2/cmd/collectors/rest/plugins/disk"
+	"github.com/netapp/harvest/v2/cmd/collectors/rest/plugins/health"
 	"github.com/netapp/harvest/v2/cmd/collectors/rest/plugins/netroute"
 	"github.com/netapp/harvest/v2/cmd/collectors/rest/plugins/ontaps3service"
 	"github.com/netapp/harvest/v2/cmd/collectors/rest/plugins/qospolicyadaptive"
@@ -370,6 +371,8 @@ func (r *Rest) LoadPlugin(kind string, abc *plugin.AbstractPlugin) plugin.Plugin
 	switch kind {
 	case "Disk":
 		return disk.New(abc)
+	case "Health":
+		return health.New(abc)
 	case "NetRoute":
 		return netroute.New(abc)
 	case "Qtree":
