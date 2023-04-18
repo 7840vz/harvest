@@ -228,6 +228,7 @@ func waitForCollectors(t *testing.T) {
 	log.Info().Msg("Wait for data to be collected")
 	countersToCheck := []string{
 		"qos_read_latency",
+		"qos_volume_read_latency",
 		"qos_detail_resource_latency",
 		"qos_detail_volume_resource_latency",
 	}
